@@ -1,0 +1,9 @@
+pybullet
+fastapi
+uvicorn[standard]
+websockets
+openai
+Pillow
+numpy
+python-dotenv
+python-multipart

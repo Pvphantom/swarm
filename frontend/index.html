@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SwarmBuild — Multi-Agent Construction</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <!-- LEFT: upload + blueprint -->
+    <aside id="left-panel" class="panel">
+      <div class="brand">
+        <span class="logo">◆</span>
+        <div>
+          <h1>SwarmBuild</h1>
+          <p class="tagline">multi-agent construction swarm</p>
+        </div>
+      </div>
+
+      <section class="card">
+        <h2>1 · Blueprint source</h2>
+        <div id="dropzone" class="dropzone">
+          <input type="file" id="file-input" accept="image/*" hidden />
+          <div class="dz-inner">
+            <div class="dz-icon">⬆</div>
+            <p><strong>Drop an image</strong> or click to browse</p>
+            <p class="dz-hint">CV pipeline voxelizes it into a blueprint</p>
+          </div>
+        </div>
+        <button id="demo-btn" class="btn ghost">Use demo blueprint (chair)</button>
+        <p id="cv-status" class="status-line"></p>
+      </section>
+
+      <section class="card" id="blueprint-card" hidden>
+        <h2>2 · Voxel blueprint</h2>
+        <div class="bp-head">
+          <span id="bp-name" class="bp-name">—</span>
+          <span id="bp-source" class="pill"></span>
+        </div>
+        <canvas id="bp-canvas" width="240" height="180"></canvas>
+        <div id="bp-legend" class="legend"></div>
+        <div id="bp-meta" class="bp-meta"></div>
+        <button id="start-btn" class="btn primary" disabled>▶ Start build</button>
+        <button id="reset-btn" class="btn ghost" hidden>■ Reset simulation</button>
+      </section>
+    </aside>
+
+    <!-- CENTER: 3D viewport -->
+    <main id="viewport">
+      <div id="canvas-holder"></div>
+      <div id="overlay-hint" class="overlay-hint">Load a blueprint, then start the build ↖</div>
+      <div id="done-banner" class="done-banner" hidden>✔ BUILD COMPLETE</div>
+    </main>
+
+    <!-- RIGHT: live HUD -->
+    <aside id="right-panel" class="panel">
+      <section class="card">
+        <h2>Build progress</h2>
+        <div class="progress-wrap">
+          <div id="progress-bar" class="progress-bar"><span></span></div>
+          <div id="progress-label" class="progress-label">idle</div>
+        </div>
+        <div class="stat-grid">
+          <div class="stat"><span id="s-placed">0</span><label>placed</label></div>
+          <div class="stat"><span id="s-dropped">0</span><label>dropped</label></div>
+          <div class="stat"><span id="s-coll">0</span><label>collisions</label></div>
+          <div class="stat"><span id="s-time">0.0s</span><label>elapsed</label></div>
+        </div>
+        <div id="robot-reasoning" class="reasoning"></div>
+      </section>
+
+      <section class="card grow">
+        <h2>Swarm <span id="drone-count" class="pill">0</span></h2>
+        <div id="drone-list" class="drone-list"></div>
+      </section>
+
+      <section class="card grow">
+        <h2>Event log</h2>
+        <div id="event-log" class="event-log"></div>
+      </section>
+    </aside>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
