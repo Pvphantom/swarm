@@ -1,10 +1,11 @@
 // Drone mesh rendering — chassis, spinning propellers, carry indicator, trails.
 import * as THREE from "three";
-import { S, WORLD_SCALE, BLOCK_COLORS } from "./scene.js";
+import { S, WORLD_SCALE, BLOCK_COLORS } from "./scene.js?v=3";
 
 const ROLE_TINT = {
-  small: 0x8cbcff,
-  large: 0xffa680,
+  cube: 0x8cbcff,
+  beam: 0xffb784,
+  slab: 0x9bffc0,
   generalist: 0xd8d8ff,
 };
 const TRAIL_LEN = 22;

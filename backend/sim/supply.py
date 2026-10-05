@@ -1,56 +1,36 @@
-"""Supply zones — one staging area per block type.
+"""Supply feeders — one holographic, infinite feeder per piece kind.
 
-Each zone pre-spawns the exact number of blocks the blueprint needs, arranged
-in a neat stack so the frontend can render a visible "parts bin". Drones grab
-the top-most available block when they arrive.
+No physical piece exists until a drone collects one. `take()` materialises a
+piece of the exact shape the task needs at the feeder; the frontend shows a
+hologram in the meantime. Nothing can pile up or explode on spawn.
 """
-
-import pybullet as p
 
 from backend import config
 from backend.sim.block import Block
 
 
 class SupplyZone:
-    def __init__(self, block_type: str, position):
-        self.block_type = block_type
+    def __init__(self, piece_type, position):
+        self.block_type = piece_type       # "cube" | "beam" | "slab"
+        self.piece_type = piece_type
         self.position = list(position)
-        self.blocks = []          # all blocks ever spawned here
-        self._available = []      # blocks still waiting to be collected
-        self.occupants = set()    # drone ids currently picking (small capacity)
+        self.blocks = []                   # pieces that have been collected
+        self.occupants = set()
         self.capacity = 2
+        self.dispensed = 0
 
-    def replenish(self, count: int):
-        """Spawn `count` blocks stacked above the zone origin."""
-        cell = config.VOXEL_SIZE
-        for i in range(count):
-            # Stack in a short 3-wide grid so tall blueprints don't tower.
-            row = i // 3
-            col = i % 3
-            pos = [
-                self.position[0] + (col - 1) * cell * 1.2,
-                self.position[1] + cell / 2.0 + row * cell,
-                self.position[2] + 0.0,
-            ]
-            block = Block(self.block_type, pos, state="supply")
-            block.freeze()
-            self.blocks.append(block)
-            self._available.append(block)
+    def replenish(self, count):
+        return  # holographic + infinite
 
-    def take(self):
-        """Hand out the next available block, spawning one if the bin ran dry."""
-        while self._available:
-            block = self._available.pop()
-            if block.state == "supply":
-                return block
-        # Parts feeder: never let an empty bin stall the build.
-        block = Block(self.block_type, [self.position[0], config.VOXEL_SIZE, self.position[2]],
-                      state="supply")
-        block.freeze()
-        self.blocks.append(block)
-        return block
+    def take(self, w=1, d=1):
+        """Materialise a piece of shape (w x d) of this kind at the feeder."""
+        center = [self.position[0], config.VOXEL_SIZE / 2.0 + 0.2, self.position[2]]
+        piece = Block(self.piece_type, w, d, center, state="supply")
+        self.blocks.append(piece)
+        self.dispensed += 1
+        return piece
 
-    # -- occupancy (serialises pickups so drones don't pile into one bin) ---
+    # -- occupancy ---------------------------------------------------------
     def try_acquire(self, drone_id):
         if drone_id in self.occupants or len(self.occupants) < self.capacity:
             self.occupants.add(drone_id)
@@ -60,13 +40,11 @@ class SupplyZone:
     def release(self, drone_id):
         self.occupants.discard(drone_id)
 
-    @property
-    def available_count(self):
-        return sum(1 for b in self._available if b.state == "supply")
-
     def to_state(self):
         return {
-            "block_type": self.block_type,
+            "piece_type": self.piece_type,
             "position": self.position,
-            "available": self.available_count,
+            "available": "inf",
+            "dispensed": self.dispensed,
+            "hologram": True,
         }

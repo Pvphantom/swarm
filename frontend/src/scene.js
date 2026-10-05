@@ -7,16 +7,17 @@ export const WORLD_SCALE = 3.5;
 export const S = (v) => [v[0] * WORLD_SCALE, v[1] * WORLD_SCALE, v[2] * WORLD_SCALE];
 
 export const BLOCK_COLORS = {
-  small_cube: 0x4488ff,
-  large_slab: 0xff6633,
-  medium_brick: 0x44ff88,
+  cube: 0x4ca6ff,
+  beam: 0xff8c38,
+  slab: 0x66ff8c,
 };
 
-// Supply-zone world positions (must match backend config.SUPPLY_ZONES).
+// Supply-zone world positions + representative hologram shape (w x d cells),
+// must match backend config.SUPPLY_ZONES.
 const SUPPLY = {
-  small_cube: [-1.4, 0, 0.3],
-  large_slab: [-1.4, 0, 0.0],
-  medium_brick: [-1.4, 0, -0.3],
+  cube: { pos: [-1.4, 0, 0.35], w: 1, d: 1 },
+  beam: { pos: [-1.4, 0, 0.0], w: 4, d: 1 },
+  slab: { pos: [-1.4, 0, -0.35], w: 2, d: 2 },
 };
 
 export function initScene(container) {
@@ -83,30 +84,50 @@ export function initScene(container) {
   edge.position.y = -0.03;
   scene.add(edge);
 
-  // ---- supply zones ----
-  for (const [type, pos] of Object.entries(SUPPLY)) {
+  // ---- supply zones (holographic, infinite feeders) ----
+  const holograms = [];
+  const unit = 0.1 * WORLD_SCALE;
+  for (const [type, cfg] of Object.entries(SUPPLY)) {
+    const pos = cfg.pos;
     const p = S(pos);
     const pad = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.55, 0.55, 0.04, 32),
+      new THREE.CylinderGeometry(0.4, 0.4, 0.03, 32),
       new THREE.MeshStandardMaterial({
         color: BLOCK_COLORS[type],
         emissive: BLOCK_COLORS[type],
         emissiveIntensity: 0.35,
         transparent: true,
-        opacity: 0.55,
+        opacity: 0.5,
       })
     );
-    pad.position.set(p[0], 0.02, p[2]);
+    pad.position.set(p[0], 0.015, p[2]);
     pad.receiveShadow = true;
     scene.add(pad);
 
     const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(0.55, 0.02, 8, 40),
+      new THREE.TorusGeometry(0.4, 0.015, 8, 40),
       new THREE.MeshBasicMaterial({ color: BLOCK_COLORS[type] })
     );
     ring.rotation.x = Math.PI / 2;
-    ring.position.set(p[0], 0.05, p[2]);
+    ring.position.set(p[0], 0.04, p[2]);
     scene.add(ring);
+
+    // Holographic piece — shaped like the member kind, translucent + bobbing.
+    const holo = new THREE.Group();
+    const bw = cfg.w * unit, bd = cfg.d * unit;
+    const fill = new THREE.Mesh(
+      new THREE.BoxGeometry(bw, unit, bd),
+      new THREE.MeshBasicMaterial({ color: BLOCK_COLORS[type], transparent: true, opacity: 0.22 })
+    );
+    const wire = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(bw, unit, bd)),
+      new THREE.LineBasicMaterial({ color: BLOCK_COLORS[type], transparent: true, opacity: 0.9 })
+    );
+    holo.add(fill, wire);
+    holo.position.set(p[0], 0.5, p[2]);
+    holo.userData = { baseY: 0.5, phase: Math.random() * Math.PI * 2 };
+    scene.add(holo);
+    holograms.push(holo);
   }
 
   // ---- starfield ----
@@ -131,5 +152,5 @@ export function initScene(container) {
     renderer.setSize(nw, nh);
   });
 
-  return { scene, camera, renderer, controls };
+  return { scene, camera, renderer, controls, holograms };
 }

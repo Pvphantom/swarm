@@ -7,6 +7,8 @@ blueprint the swarm manager can consume:
   * computes spatial-distribution metrics used for the robot-count decision.
 """
 
+import io
+
 from backend import config
 
 VALID_TYPES = set(config.BLOCK_TYPES.keys())
@@ -85,6 +87,69 @@ def _complexity(raw, voxels, metrics):
     # Derive from voxel count + spatial spread.
     vol = min(1.0, len(voxels) / 200.0)
     return round(0.6 * vol + 0.4 * metrics["spread"], 2)
+
+
+def voxelize_image(image_bytes: bytes, max_dim: int = 8) -> dict:
+    """Local CV fallback: turn an uploaded image into a voxel silhouette.
+
+    No API key required — extracts the subject as a foreground mask, downsamples
+    to a grid, and builds a front-facing voxel wall. Block type is chosen per
+    cell by brightness so the swarm still uses all three specialists.
+    """
+    try:
+        import numpy as np
+        from PIL import Image
+    except Exception:
+        return build_demo_blueprint()
+
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    except Exception:
+        return build_demo_blueprint()
+
+    w, h = img.size
+    scale = max_dim / max(w, h)
+    gw = min(config.MAX_GRID, max(2, round(w * scale)))
+    gh = min(config.MAX_GRID, max(2, round(h * scale)))
+    small = img.resize((gw, gh), Image.LANCZOS)
+    arr = np.asarray(small).astype(float)
+    rgb, alpha = arr[..., :3], arr[..., 3]
+    lum = 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
+
+    # Foreground mask: prefer transparency, else "differs from the border".
+    if (alpha < 250).any():
+        mask = alpha > 128
+    else:
+        border = np.concatenate([lum[0, :], lum[-1, :], lum[:, 0], lum[:, -1]])
+        bg = np.median(border)
+        diff = np.abs(lum - bg)
+        mask = diff > max(18.0, np.percentile(diff, 55))
+        frac = mask.mean()
+        if frac < 0.08 or frac > 0.9:      # bad separation → threshold on brightness
+            med = np.median(lum)
+            mask = lum < med if (lum < med).mean() < 0.6 else lum >= med
+
+    voxels = []
+    for row in range(gh):
+        for col in range(gw):
+            if not mask[row, col]:
+                continue
+            l = lum[row, col]
+            bt = "large_slab" if l < 85 else ("medium_brick" if l < 170 else "small_cube")
+            voxels.append({"x": int(col), "y": int(gh - 1 - row), "z": 0, "block_type": bt})
+
+    if len(voxels) < 3:
+        return build_demo_blueprint()
+
+    # Drop empty bottom rows / left columns so the model sits at the origin.
+    miny = min(v["y"] for v in voxels)
+    minx = min(v["x"] for v in voxels)
+    for v in voxels:
+        v["y"] -= miny
+        v["x"] -= minx
+
+    bp = process({"object_name": "uploaded image", "voxels": voxels})
+    return bp
 
 
 def build_demo_blueprint() -> dict:

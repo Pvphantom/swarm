@@ -154,6 +154,9 @@ html, body {
   transition: width .3s ease; box-shadow: 0 0 12px #44ff8855;
 }
 .progress-label { font-size: 11px; color: var(--accent); min-width: 46px; text-align: right; }
+.layer-status { font-size: 10.5px; color: var(--text-dim); margin: -4px 0 10px; }
+.layer-status b { color: var(--accent); }
+.layer-status .ok { color: var(--green); }
 
 .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .stat {
@@ -165,6 +168,9 @@ html, body {
 
 .reasoning { margin-top: 10px; font-size: 10px; color: var(--text-dim); line-height: 1.6; }
 .reasoning b { color: var(--accent); }
+.structure { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+.structure .ok { color: var(--green); }
+.structure .warn { color: var(--orange); }
 
 /* ---------- drone list ---------- */
 .drone-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }

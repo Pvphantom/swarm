@@ -1,39 +1,45 @@
-"""Swarm orchestration.
+"""Swarm orchestration (structural-piece build).
 
-Owns the drones, the task queue, and the per-physics-step control loop that:
-  * auctions ready tasks to idle drones,
-  * ticks each drone's control/FSM,
-  * detects collisions and handles placement failures,
-  * reassigns idle generalists to help with stranded specialist work.
-
-`control_step()` is called once per PyBullet step by the runner; `env.step()`
-is called right after by the runner.
+The planner decomposes the blueprint into real pieces (cubes / beams / slabs);
+each piece is one Task. Pieces are built strictly bottom-up: because every piece
+rests on the layer beneath it, finishing a whole layer before the next starts
+guarantees each piece has its support in place when it's set down.
 """
 
 import math
 import time
 
 from backend import config
-from backend.swarm import failure, specialist
+from backend.swarm import failure, planner, specialist
 from backend.swarm.allocator import TaskAllocator
+
+PLACEMENT_TOL = config.VOXEL_SIZE * 0.6   # a piece this close to target counts as placed
 
 
 class Task:
     _next = 0
 
-    def __init__(self, voxel, block_type, placement_pos):
+    def __init__(self, spec):
         self.id = Task._next
         Task._next += 1
-        self.voxel = tuple(voxel)                       # (x, y, z) grid coords
-        self.block_type = block_type
-        self.block_type_specialist = config.BLOCK_TYPES[block_type]["specialist_type"]
-        self.placement_pos = list(placement_pos)        # world-space centre
+        self.spec = spec
+        self.piece_type = spec["type"]
+        self.w = spec["w"]
+        self.d = spec["d"]
+        self.cells = spec["cells"]
+        self.layer = spec["y"]
+        self.voxel = (spec["x0"], spec["y"], spec["z0"])   # anchor (for logs/verify)
+        self.placement_pos = list(spec["center"])
+        self.block_type_specialist = config.PIECE_TYPES[self.piece_type]["specialist"]
 
         self.assigned_drone = None
-        self.block = None            # Block being carried for this task
-        self.recover_block = None    # set when this is a dropped-block recovery
+        self.block = None             # piece being carried
+        self.recover_block = None     # dropped piece to recover
         self.attempts = 0
-        self.exclude_drone = None    # drone id barred from re-attempting
+        self.exclude_drone = None
+
+    def label(self):
+        return f"{self.piece_type} {self.w}x{self.d}"
 
 
 class SwarmManager:
@@ -48,12 +54,18 @@ class SwarmManager:
         self.dropped_blocks = []
         self.events = []
 
-        self.required_voxels = set()
-        self.placed_voxels = set()
         self.total_tasks = 0
         self.robot_reasoning = {}
-        self.current_layer = 0          # Litematica-style: build one Y-layer at a time
-        self.layers = []                # sorted list of occupied Y layers
+        self.current_layer = 0
+        self.layers = []
+        self.layer_tasks = {}            # layer -> [Task]
+        self.placed_pieces = {}          # task.id -> placed Block
+        self._settling = []              # [block, frames, layer] -> set after settling
+        self.verified_layers = set()
+        self._verify_attempts = {}
+
+        self.plan_stats = {}
+        self.scaffold = set()
 
         self.stats = {"placed": 0, "dropped": 0, "collisions": 0}
         self.started_at = None
@@ -64,33 +76,42 @@ class SwarmManager:
         self.generate_tasks()
         count = self.calculate_robot_count()
         self.spawn_drones(count)
-        self._replenish_supply()
         self.started_at = time.time()
-        self.log(f"Swarm deployed: {count} drones for {self.total_tasks} blocks")
+        s = self.plan_stats
+        self.log(f"Planner: {s['pieces']} pieces from {s['voxels']} voxels "
+                 f"({self._fmt_types(s['by_type'])}; biggest {s['biggest']} cells)")
+        self.log(f"Swarm deployed: {count} drones")
         return count
 
-    def calculate_robot_count(self):
-        voxels = self.blueprint["voxels"]
-        n = len(voxels) or 1
+    @staticmethod
+    def _fmt_types(by_type):
+        return ", ".join(f"{n} {t}" for t, n in by_type.items())
 
-        # Factor 1 — spatial distribution across build-footprint quadrants.
-        xs = [v["x"] for v in voxels]
-        zs = [v["z"] for v in voxels]
+    def generate_tasks(self):
+        pieces, scaffold, stats = planner.plan(self.blueprint["voxels"],
+                                               self.blueprint["dimensions"])
+        self.scaffold = scaffold
+        self.plan_stats = stats
+        pieces.sort(key=lambda p: (p["y"], -(p["w"] * p["d"])))
+        for spec in pieces:
+            task = Task(spec)
+            self.task_queue.append(task)
+            self.layer_tasks.setdefault(task.layer, []).append(task)
+        self.total_tasks = len(self.task_queue)
+        self.layers = sorted(self.layer_tasks)
+        self.current_layer = self.layers[0] if self.layers else 0
+
+    def calculate_robot_count(self):
+        pieces = self.task_queue
+        n = len(pieces) or 1
+        xs = [t.placement_pos[0] for t in pieces]
+        zs = [t.placement_pos[2] for t in pieces]
         midx = (min(xs) + max(xs)) / 2.0
         midz = (min(zs) + max(zs)) / 2.0
-        quadrants = {(v["x"] > midx, v["z"] > midz) for v in voxels}
-        spatial = len(quadrants)                     # 1..4
-
-        # Factor 2 — time: aim for a handful of placements per drone.
-        tasks_per_robot = 6
-        time_factor = math.ceil(n / tasks_per_robot)
-
-        # Factor 3 — block-type diversity (>=1 specialist per type).
-        distinct = len({v["block_type"] for v in voxels})
-
-        count = max(spatial, time_factor, distinct, 1)
-        count = min(count, config.MAX_DRONES)
-
+        spatial = len({(x > midx, z > midz) for x, z in zip(xs, zs)})
+        time_factor = math.ceil(n / 4)
+        distinct = len({t.piece_type for t in pieces})
+        count = min(max(spatial, time_factor, distinct, 1), config.MAX_DRONES)
         self.robot_reasoning = {
             "spatial_quadrants": spatial,
             "time_factor": time_factor,
@@ -101,57 +122,26 @@ class SwarmManager:
 
     def spawn_drones(self, count):
         from backend.sim.drone import Drone
-
-        present = {v["block_type"] for v in self.blueprint["voxels"]}
+        present = {t.piece_type for t in self.task_queue}
         roles = []
-        # One specialist per present specialist block type, if budget allows.
-        if "small_cube" in present:
-            roles.append("small")
-        if "large_slab" in present:
-            roles.append("large")
+        for kind in ("slab", "beam", "cube"):   # one specialist per present kind
+            if kind in present:
+                roles.append(kind)
         roles = roles[:count]
         while len(roles) < count:
             roles.append("generalist")
-        # Guarantee a generalist when medium_brick is needed.
-        if "medium_brick" in present and "generalist" not in roles and roles:
-            roles[-1] = "generalist"
-
         for i, role in enumerate(roles):
-            row = i % 5
-            col = i // 5
-            start = [
-                config.STAGING_ORIGIN[0] + col * config.STAGING_SPACING,
-                config.CRUISE_HEIGHT,
-                config.STAGING_ORIGIN[2] + row * config.STAGING_SPACING,
-            ]
+            row, col = i % 5, i // 5
+            start = [config.STAGING_ORIGIN[0] + col * config.STAGING_SPACING,
+                     config.CRUISE_HEIGHT,
+                     config.STAGING_ORIGIN[2] + row * config.STAGING_SPACING]
             self.drones.append(Drone(i, role, start))
 
-    def generate_tasks(self):
-        grid_dim = self.blueprint["dimensions"]
-        # Build bottom layers first so blocks have something to rest on.
-        voxels = sorted(self.blueprint["voxels"], key=lambda v: (v["y"], v["x"], v["z"]))
-        for v in voxels:
-            world = config.voxel_to_world(v["x"], v["y"], v["z"], grid_dim)
-            task = Task((v["x"], v["y"], v["z"]), v["block_type"], world)
-            self.task_queue.append(task)
-            self.required_voxels.add((v["x"], v["y"], v["z"]))
-        self.total_tasks = len(self.task_queue)
-        self.layers = sorted({v["y"] for v in voxels})
-        self.current_layer = self.layers[0] if self.layers else 0
-
-    def _replenish_supply(self):
-        counts = {}
-        for task in self.task_queue:
-            counts[task.block_type] = counts.get(task.block_type, 0) + 1
-        for block_type, n in counts.items():
-            self.env.supply_zones[block_type].replenish(n)
-
-    # -- per-step control loop --------------------------------------------
+    # -- control loop ------------------------------------------------------
     def control_step(self):
         if self.finished:
             return
         self._allocate()
-
         for drone in self.drones:
             result = drone.tick(self.events)
             if result is None:
@@ -160,38 +150,54 @@ class SwarmManager:
             drone.finished_task = None
             if result == "placed":
                 self.stats["placed"] += 1
-                self.placed_voxels.add(task.voxel)
                 self.completed_tasks.append(task)
+                self._finalize_placement(task)
             elif result == "place_failed":
                 failure.handle_placement_failure(self, drone, task)
 
+        self._process_settling()
         failure.detect_collisions(self)
         self._advance_layer()
         self._reassign_check()
         self._trim_events()
 
-        if (not self.task_queue
+        if (not self.finished and not self.task_queue
                 and all(d.task is None for d in self.drones)
-                and len(self.completed_tasks) >= self.total_tasks):
-            if not self.finished:
-                self.finished = True
-                self.log("Build complete")
+                and set(self.layers).issubset(self.verified_layers)):
+            _, strays = self._scan_pieces()
+            self._cleanup_strays(strays)
+            self.finished = True
+            self.log("Build complete — structure verified ✓")
+
+    def _process_settling(self):
+        """Pieces rest dynamically on their supports, then set (become static)."""
+        still = []
+        for item in self._settling:
+            blk, frames, layer = item
+            if blk.body is None:
+                continue
+            frames -= 1
+            if frames <= 0:
+                # Align to exact target (it demonstrated it rests) and set.
+                blk.teleport(blk.target_pos)
+                blk.make_static()
+            else:
+                still.append([blk, frames, layer])
+        self._settling = still
+
+    def _layer_settling(self, layer):
+        return any(l == layer and f > 0 for _, f, l in self._settling)
 
     def _allocate(self):
         idle = [d for d in self.drones if d.is_idle]
         if not idle or not self.task_queue:
             return
-        # Only run as many drones at once as the space can absorb; piling every
-        # drone into one cramped layer causes collisions without speeding things
-        # up. Recovery work always gets a drone regardless of the cap.
         active = sum(1 for d in self.drones if d.task is not None)
         slots = max(0, min(config.MAX_CONCURRENT_BUILDERS, len(self.drones)) - active)
-
-        for task in list(self.task_queue):
+        ready = [t for t in self.task_queue if self._task_ready(t)]
+        for task in ready:
             if not idle:
                 break
-            if not self._task_ready(task):
-                continue
             is_recovery = task.recover_block is not None
             if not is_recovery and slots <= 0:
                 continue
@@ -205,27 +211,111 @@ class SwarmManager:
             if not is_recovery:
                 slots -= 1
             tag = " (recovery)" if is_recovery else ""
-            self.log(f"Task {task.voxel} {task.block_type}{tag} -> Drone {winner.id}")
+            self.log(f"{task.label()} @ layer {task.layer}{tag} -> Drone {winner.id}")
 
     def _task_ready(self, task):
-        # Recovery of a dropped block is always allowed (its voxel belongs to a
-        # layer at or below the current one anyway).
-        if task.recover_block is not None:
-            return True
-        # Strict layer-by-layer: only the current layer's voxels are buildable.
-        return task.voxel[1] == self.current_layer
+        # Recovery always allowed; otherwise strict bottom-up (the layer below is
+        # fully placed before this layer starts, so support is guaranteed).
+        return task.recover_block is not None or task.layer == self.current_layer
 
     def _advance_layer(self):
-        """Advance to the next Y-layer once the current one is fully built."""
-        pending = any(t.voxel[1] == self.current_layer for t in self.task_queue)
-        active = any(d.task is not None and d.task.voxel[1] == self.current_layer
+        pending = any(t.layer == self.current_layer for t in self.task_queue)
+        active = any(d.task is not None and d.task.layer == self.current_layer
                      for d in self.drones)
-        if pending or active:
+        if pending or active or self._layer_settling(self.current_layer):
             return
-        remaining = sorted({t.voxel[1] for t in self.task_queue})
+        if not self._verify_and_repair(self.current_layer):
+            return
+        remaining = sorted({t.layer for t in self.task_queue})
         if remaining and remaining[0] != self.current_layer:
             self.current_layer = remaining[0]
             self.log(f"Layer {self.current_layer} unlocked")
+
+    # -- placement + verification -----------------------------------------
+    def _finalize_placement(self, task):
+        """Record a placed piece. It was set down under real gravity and settled
+        on its supports; now the joint sets (mortar cures) so this course is a
+        solid base for the next — real construction sequencing, not a weld hack."""
+        if task.block is None:
+            return
+        self.placed_pieces[task.id] = task.block
+        task.block.state = "placed"
+        # Let it settle on its supports under real gravity, then set (mortar
+        # cures) so this course is a solid base for the next one.
+        self._settling.append([task.block, config.PLACE_SETTLE_FRAMES, task.layer])
+        support = "ground" if task.layer == 0 else "the course below"
+        if task.piece_type == "slab":
+            self.log(f"Slab {task.w}x{task.d} set down, resting on {support}")
+        elif task.piece_type == "beam" and max(task.w, task.d) >= 3:
+            self.log(f"Beam spanning {max(task.w, task.d)} cells bridged onto {support}")
+
+    def _scan_pieces(self):
+        placed, strays = [], []
+        for zone in self.env.supply_zones.values():
+            for b in zone.blocks:
+                if b.body is None:
+                    continue
+                if b.state == "placed":
+                    placed.append(b)
+                elif b.state == "dropped":
+                    strays.append(b)
+        return placed, strays
+
+    def _verify_and_repair(self, layer):
+        """Confirm every planned piece in the layer is resting at its target."""
+        placed, strays = self._scan_pieces()
+        missing = []
+        for task in self.layer_tasks.get(layer, []):
+            blk = self.placed_pieces.get(task.id)
+            ok = blk is not None and blk.body is not None and \
+                blk.distance_to(task.placement_pos) <= PLACEMENT_TOL
+            if not ok:
+                missing.append(task)
+
+        if not missing:
+            if layer not in self.verified_layers:
+                self.verified_layers.add(layer)
+                self.log(f"Layer {layer} verified ✓ "
+                         f"({len(self.layer_tasks.get(layer, []))} pieces resting true)")
+            self._cleanup_strays(strays)
+            return True
+
+        self.log(f"Layer {layer} verify: {len(missing)} piece(s) off-target — repairing")
+        for task in missing:
+            self._verify_attempts[task.id] = self._verify_attempts.get(task.id, 0) + 1
+            self.placed_pieces.pop(task.id, None)
+            if self._verify_attempts[task.id] >= 3:
+                self._force_place(task, strays)
+                continue
+            new = Task(task.spec)
+            if strays:
+                new.recover_block = strays.pop()
+            self.layer_tasks[layer].append(new)
+            self.task_queue.append(new)
+        return False
+
+    def _force_place(self, task, strays):
+        """Deterministic fallback: set the piece exactly on its supports."""
+        from backend.sim.block import Block
+        blk = strays.pop() if strays else Block(task.piece_type, task.w, task.d,
+                                                task.placement_pos)
+        blk.teleport(task.placement_pos)
+        blk.set_solid()
+        blk.make_static()
+        blk.state = "placed"
+        if blk not in self.env.supply_zones[task.piece_type].blocks:
+            self.env.supply_zones[task.piece_type].blocks.append(blk)
+        self.placed_pieces[task.id] = blk
+        self.log(f"Auto-corrected {task.label()} at layer {task.layer}")
+
+    def _cleanup_strays(self, strays):
+        for b in strays:
+            if any(t.recover_block is b for t in self.task_queue):
+                continue
+            zone = self.env.supply_zones.get(b.piece_type)
+            if zone and b in zone.blocks:
+                zone.blocks.remove(b)
+            b.remove()
 
     def _reassign_check(self):
         idle = [d for d in self.drones if d.is_idle]
@@ -247,9 +337,12 @@ class SwarmManager:
 
     def status(self):
         in_progress = sum(1 for d in self.drones if d.task is not None)
+        completed = len([t for t in self.completed_tasks if t.id in self.placed_pieces])
+        completed = min(len(self.placed_pieces), self.total_tasks)
         return {
             "total_tasks": self.total_tasks,
-            "completed": len(self.completed_tasks),
+            "completed": completed,
+            "verified_layers": sorted(self.verified_layers),
             "in_progress": in_progress,
             "queued": len(self.task_queue),
             "finished": self.finished,
@@ -257,5 +350,12 @@ class SwarmManager:
             "current_layer": self.current_layer,
             "total_layers": len(self.layers),
             "robot_reasoning": self.robot_reasoning,
+            "structure": {
+                "pieces": self.plan_stats.get("pieces", 0),
+                "voxels": self.plan_stats.get("voxels", 0),
+                "by_type": self.plan_stats.get("by_type", {}),
+                "biggest": self.plan_stats.get("biggest", 0),
+                "scaffold": len(self.scaffold),
+            },
             "stats": {**self.stats, "elapsed": self.elapsed},
         }

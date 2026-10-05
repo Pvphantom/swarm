@@ -62,10 +62,11 @@ class Drone:
         half = config.DRONE_HALF_EXTENTS
         # Colour tint by role so the frontend can distinguish them.
         tint = {
-            "small": [0.55, 0.75, 1.0, 1.0],
-            "large": [1.0, 0.65, 0.5, 1.0],
+            "cube": [0.55, 0.75, 1.0, 1.0],
+            "beam": [1.0, 0.72, 0.5, 1.0],
+            "slab": [0.6, 1.0, 0.72, 1.0],
             "generalist": [0.85, 0.85, 1.0, 1.0],
-        }[specialist_type]
+        }.get(specialist_type, [0.85, 0.85, 1.0, 1.0])
         col = p.createCollisionShape(p.GEOM_BOX, halfExtents=half)
         vis = p.createVisualShape(p.GEOM_BOX, halfExtents=half, rgbaColor=tint)
         self.body = p.createMultiBody(
@@ -75,6 +76,9 @@ class Drone:
             basePosition=list(start_pos),
         )
         p.changeDynamics(self.body, -1, linearDamping=0.6, angularDamping=0.9)
+        # Drones are physical ghosts: their collisions are detected by the
+        # manager's distance check, so they never physically knock the structure.
+        p.setCollisionFilterGroupMask(self.body, -1, 0, 0)
 
     # -- queries -----------------------------------------------------------
     @property
@@ -94,7 +98,7 @@ class Drone:
         pos, _ = p.getBasePositionAndOrientation(self.body)
         lin, _ = p.getBaseVelocity(self.body)
 
-        carried_mass = self.carrying_block.spec["mass"] if self.carrying_block else 0.0
+        carried_mass = self.carrying_block.mass if self.carrying_block else 0.0
         total_mass = config.DRONE_MASS + carried_mass
 
         force = [0.0, total_mass * GRAV, 0.0]           # hover / anti-gravity
@@ -142,23 +146,23 @@ class Drone:
             childLinkIndex=-1,
             jointType=p.JOINT_FIXED,
             jointAxis=[0, 0, 0],
-            parentFramePosition=[0, -0.12, 0],
+            parentFramePosition=[0, -config.CARRY_OFFSET, 0],
             childFramePosition=[0, 0, 0],
         )
-        p.changeConstraint(self._constraint, maxForce=80)
+        p.changeConstraint(self._constraint, maxForce=300)
 
     def place_block(self, target_pos):
-        """Release the carried block; it falls the last few cm into place."""
+        """Release the carried piece aligned over its target; it settles onto its
+        supports under real gravity (no snap-lock, no welding)."""
         block = self.carrying_block
         if self._constraint is not None:
             p.removeConstraint(self._constraint)
             self._constraint = None
         if block is not None:
-            # Snap to the exact target and lock it static so the voxel lattice
-            # stays perfect — no drone or dropped block can knock it loose.
-            block.teleport(list(target_pos))
+            # Align over the target and release just above the supports.
+            block.teleport([target_pos[0], target_pos[1] + config.RELEASE_GAP, target_pos[2]])
             block.set_solid()
-            block.make_static()
+            block.make_dynamic()   # real rigid body held up by its supports
             block.state = "placed"
             block.target_pos = list(target_pos)
         self.carrying_block = None
@@ -172,7 +176,7 @@ class Drone:
             p.removeConstraint(self._constraint)
             self._constraint = None
         if block is not None:
-            block.set_solid()   # restore physics so it falls and rests
+            block.set_fall_clear()   # falls past the structure to the floor
             block.state = "dropped"
         self.carrying_block = None
         self.carrying_block_type = None
@@ -252,7 +256,7 @@ class Drone:
             if task.recover_block is not None:
                 pickup_xz = task.recover_block.position
             else:
-                pickup_xz = self._env.supply_zones[task.block_type].position
+                pickup_xz = self._env.supply_zones[task.piece_type].position
             self._pickup_xz = pickup_xz
             self._apply_pd(self._above(pickup_xz))
             if self._reached(self._above(pickup_xz), tol=0.08):
@@ -283,7 +287,7 @@ class Drone:
     def _tick_pick(self, task, events):
         block_pos = self._pickup_xz
         from_supply = task.recover_block is None
-        zone = self._env.supply_zones[task.block_type] if from_supply else None
+        zone = self._env.supply_zones[task.piece_type] if from_supply else None
 
         if self._phase == 0:
             # Serialise supply pickups: wait in-lane above the bin until it's
@@ -302,7 +306,7 @@ class Drone:
                 self._phase = 1
             return None
         if self._phase == 1:
-            block = task.recover_block if not from_supply else zone.take()
+            block = task.recover_block if not from_supply else zone.take(task.w, task.d)
             self.pick_up(block)
             task.block = block
             self._phase = 2
@@ -322,44 +326,24 @@ class Drone:
     def _tick_place(self, task, events):
         target = task.placement_pos
         if self._phase == 0:
-            # Dip toward the target column, staying high enough to keep lane
-            # separation; the block snaps to its exact target on release.
+            # Dip toward the target, staying high enough to keep lane separation.
             drop_y = max(self.lane - 0.14, target[1] + config.CARRY_OFFSET + config.RELEASE_GAP)
             drop_pt = [target[0], drop_y, target[2]]
             self._apply_pd(drop_pt)
-            if self._reached(drop_pt, tol=0.04) or self._pt > config.DESCEND_TIMEOUT:
+            if self._reached(drop_pt, tol=0.05) or self._pt > config.DESCEND_TIMEOUT:
                 self._phase = 1
             return None
-        if self._phase == 1:
-            # Release and start settle countdown.
-            self.place_block(target)
-            self._settle = config.PLACEMENT_SETTLE_STEPS
-            self._phase = 2
-            return None
-        if self._phase == 2:
-            # Hold position above while the block settles.
-            self._apply_pd(self._above(target))
-            self._settle -= 1
-            if self._settle <= 0:
-                self._phase = 3
-            return None
-        # phase 3: verify placement tolerance
-        block = task.block
-        ok = False
-        if block is not None:
-            err = block.distance_to(target)
-            ok = err <= config.PLACEMENT_TOLERANCE + config.VOXEL_SIZE * 0.5
+        # phase 1: release the piece onto its supports (real gravity) and COMMIT
+        # immediately — once it's down, the placement is done, so a later
+        # collision can't orphan it or cause a double-placement. The manager
+        # lets it settle and then sets it.
+        self.place_block(target)
         self.state = IDLE
         done_task = self.task
         self.finished_task = done_task
         self.task = None
-        if ok:
-            events.append(f"Drone {self.id} placed {done_task.block_type} at voxel "
-                          f"{done_task.voxel}")
-            return "placed"
-        events.append(f"Drone {self.id} placement out of tolerance at voxel "
-                      f"{done_task.voxel}")
-        return "place_failed"
+        events.append(f"Drone {self.id} set {done_task.label()} on layer {done_task.layer}")
+        return "placed"
 
     # -- streaming ---------------------------------------------------------
     def to_state(self):

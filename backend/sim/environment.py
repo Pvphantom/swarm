@@ -37,6 +37,8 @@ class Environment:
         ground_col = p.createCollisionShape(p.GEOM_PLANE, planeNormal=[0, 1, 0])
         self.ground = p.createMultiBody(0, ground_col)
         p.changeDynamics(self.ground, -1, lateralFriction=1.0)
+        # Ground is collision group 1; dropped pieces collide only with it.
+        p.setCollisionFilterGroupMask(self.ground, -1, 1, -1)
 
         self._build_board()
         self._build_supply_zones()

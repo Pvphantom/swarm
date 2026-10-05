@@ -121,6 +121,14 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def no_cache(request, call_next):
+    """Dev convenience: never cache static assets, so edits always load fresh."""
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
+
 # ==========================================================================
 # REST routes
 # ==========================================================================
@@ -134,8 +142,9 @@ async def upload(file: UploadFile = File(...)):
 
     raw = pipeline.analyze_image(image_b64, mime=mime)
     if raw is None:
-        blueprint = voxelizer.build_demo_blueprint()
-        blueprint["source"] = "fallback_demo"
+        # No GPT-4o key (or the call failed) → local CV voxelizes the actual image.
+        blueprint = voxelizer.voxelize_image(data)
+        blueprint["source"] = "local_cv"
     else:
         blueprint = voxelizer.process(raw)
         blueprint["source"] = "gpt-4o"

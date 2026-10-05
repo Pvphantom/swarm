@@ -67,8 +67,11 @@ def detect_collisions(manager):
                     else:
                         manager.dropped_blocks.append(dropped)
                 elif task is not None:
-                    # Interrupted before pickup; block still in supply, just retry.
-                    task.recover_block = None
+                    # Interrupted before pickup — just retry. Keep recover_block
+                    # intact: if this was a recovery task, the dropped block it
+                    # targets is still on the ground and must not be orphaned
+                    # (clearing it here caused a fresh block to be dispensed and
+                    # the old one to be abandoned as a stray).
                     _requeue_front(manager, task)
 
 
@@ -102,11 +105,10 @@ def handle_placement_failure(manager, drone, task):
         )
 
     if task.attempts >= 6:
-        # Give up gracefully so the build can complete (demo safety valve).
-        # Mark the voxel placed so anything stacked above it isn't stranded.
-        events.append(f"Task at voxel {task.voxel} abandoned after repeated failures")
-        manager.completed_tasks.append(task)
-        manager.placed_voxels.add(task.voxel)
+        # Drop the task after repeated failures; the per-layer verifier will
+        # detect the missing cell and repair it (ultimately force-placing it),
+        # so we never falsely mark a voxel as done.
+        events.append(f"Task at voxel {task.voxel} dropped — verifier will repair")
         return
 
     manager.task_queue.insert(0, task)

@@ -3,8 +3,10 @@ const $ = (id) => document.getElementById(id);
 
 const BLOCK_HEX = { small_cube: "#4488ff", large_slab: "#ff6633", medium_brick: "#44ff88" };
 const BLOCK_LABEL = { small_cube: "Small cube", large_slab: "Large slab", medium_brick: "Medium brick" };
-const ROLE_LABEL = { small: "Small spec.", large: "Large spec.", generalist: "Generalist" };
-const ROLE_HEX = { small: "#8cbcff", large: "#ffa680", generalist: "#d8d8ff" };
+// Structural-piece colours / drone-role labels.
+const PIECE_HEX = { cube: "#4ca6ff", beam: "#ff8c38", slab: "#66ff8c" };
+const ROLE_LABEL = { cube: "Cube spec.", beam: "Beam spec.", slab: "Slab spec.", generalist: "Generalist" };
+const ROLE_HEX = { cube: "#8cbcff", beam: "#ffb784", slab: "#9bffc0", generalist: "#d8d8ff" };
 
 export function initUI(handlers) {
   let currentBlueprint = null;
@@ -140,6 +142,7 @@ export function initUI(handlers) {
     $("drone-count").textContent = "0";
     $("drone-list").innerHTML = "";
     $("event-log").innerHTML = "";
+    $("structure-info").innerHTML = "";
     lastEventCount = 0;
   }
 
@@ -151,6 +154,17 @@ export function initUI(handlers) {
     const pct = bp.total_tasks ? Math.round((bp.completed / bp.total_tasks) * 100) : 0;
     $("progress-bar").firstElementChild.style.width = pct + "%";
     $("progress-label").textContent = `${bp.completed}/${bp.total_tasks}`;
+
+    // Layer verification status (Litematica-style build).
+    if (bp.total_layers) {
+        const cur = (bp.current_layer ?? 0) + 1;
+        const verified = bp.verified_layers ?? 0;
+        const done = state.finished;
+        $("layer-status").innerHTML = done
+            ? `<span class="ok">✓ all ${bp.total_layers} layers verified against blueprint</span>`
+            : `Building layer <b>${cur}</b> / ${bp.total_layers} · ` +
+              `<span class="ok">${verified} verified ✓</span>`;
+    }
 
     const st = state.stats || {};
     $("s-placed").textContent = st.placed ?? 0;
@@ -166,11 +180,25 @@ export function initUI(handlers) {
         `spatial ${r.spatial_quadrants}q · time ${r.time_factor} · ${r.distinct_block_types} block types`;
     }
 
+    // Adaptive decomposition summary.
+    const struc = state.structure;
+    if (struc && struc.pieces) {
+        const bt = struc.by_type || {};
+        const parts = Object.keys(PIECE_HEX)
+            .filter((k) => bt[k])
+            .map((k) => `<span style="color:${PIECE_HEX[k]}">${bt[k]} ${k}${bt[k] > 1 ? "s" : ""}</span>`)
+            .join(" · ");
+        $("structure-info").innerHTML =
+            `<b>${struc.pieces}</b> pieces from ${struc.voxels} voxels<br>` +
+            `${parts}<br>biggest piece <b>${struc.biggest}</b> cells` +
+            (struc.scaffold ? ` · ${struc.scaffold} support` : "");
+    }
+
     // Drone list.
     $("drone-count").textContent = state.drones.length;
     $("drone-list").innerHTML = state.drones.map((d) => {
       const carry = d.carrying
-        ? `<span class="carry-dot" style="background:${BLOCK_HEX[d.carrying]}"></span>`
+        ? `<span class="carry-dot" style="background:${PIECE_HEX[d.carrying]}"></span>`
         : `<span class="carry-none">·</span>`;
       const reassigned = d.reassigned ? `<span class="tag-reassigned">helper</span>` : "";
       return `<div class="drone-row ${d.collision_flash ? "flash" : ""}">

@@ -24,7 +24,7 @@ class TaskAllocator:
         if task.recover_block is not None:
             source_pos = task.recover_block.position
         else:
-            source_pos = self.env.supply_zones[task.block_type].position
+            source_pos = self.env.supply_zones[task.piece_type].position
         dist_to_supply = distance(drone.position, source_pos)
         dist_to_placement = distance(source_pos, task.placement_pos)
         return dist_to_supply + dist_to_placement
@@ -33,7 +33,7 @@ class TaskAllocator:
         """Return the winning drone for `task`, or None if nobody can bid."""
         bids = {}
         for drone in available_drones:
-            if not drone.can_handle(task.block_type):
+            if not drone.can_handle(task.piece_type):
                 continue
             bid = self.calculate_bid(drone, task)
             # Specialists are faster on their own block type -> discount.

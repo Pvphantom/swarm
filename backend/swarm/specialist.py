@@ -21,9 +21,9 @@ def role_can_handle(specialist_type: str, block_type: str) -> bool:
     return block_type in SPECIALIST_RULES[specialist_type]
 
 
-def block_specialist(block_type: str) -> str:
-    """The role that specialises in this block type."""
-    return config.BLOCK_TYPES[block_type]["specialist_type"]
+def block_specialist(piece_type: str) -> str:
+    """The role that specialises in this piece kind."""
+    return config.PIECE_TYPES[piece_type]["specialist"]
 
 
 def needs_generalist_help(pending_tasks, idle_drones) -> bool:
